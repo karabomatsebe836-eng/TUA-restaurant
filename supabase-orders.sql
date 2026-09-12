@@ -27,6 +27,9 @@ $$;
 
 alter table public.orders enable row level security;
 
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on table public.orders to anon, authenticated;
+
 drop policy if exists "Anyone can read orders for this demo" on public.orders;
 drop policy if exists "Anyone can create orders for this demo" on public.orders;
 drop policy if exists "Anyone can update orders for this demo" on public.orders;
