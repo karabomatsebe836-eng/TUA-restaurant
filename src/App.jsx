@@ -22,6 +22,7 @@ import {
   LayoutDashboard,
   CircleDot,
 } from "lucide-react";
+import { supabase } from "./lib/supabase";
 
 const seedMenu = [
   {
@@ -120,6 +121,38 @@ function loadStored(key, fallback) {
   }
 }
 
+function orderFromRow(row) {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    items: row.items,
+    total: Number(row.total),
+    name: row.customer_name,
+    phone: row.phone,
+    address: row.address || "",
+    delivery: row.delivery,
+    notes: row.notes || "",
+    payment: row.payment_method,
+    status: row.status,
+  };
+}
+
+function orderToRow(order) {
+  return {
+    id: order.id,
+    created_at: order.createdAt,
+    customer_name: order.name,
+    phone: order.phone,
+    address: order.address || null,
+    delivery: order.delivery,
+    notes: order.notes || null,
+    payment_method: order.payment,
+    total: order.total,
+    status: order.status,
+    items: order.items,
+  };
+}
+
 function App() {
   const [menu, setMenu] = useState(() => loadStored("tua-menu", seedMenu));
   const [orders, setOrders] = useState(() => loadStored("tua-orders", []));
@@ -141,6 +174,24 @@ function App() {
     () => localStorage.setItem("tua-orders", JSON.stringify(orders)),
     [orders],
   );
+  useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    supabase
+      .from("orders")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .then(({ data, error }) => {
+        if (error) {
+          setNotice(`Could not load orders: ${error.message}`);
+          return;
+        }
+        if (active) setOrders((data || []).map(orderFromRow));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     if (user) localStorage.setItem("tua-user", JSON.stringify(user));
   }, [user]);
@@ -191,7 +242,7 @@ function App() {
         .filter((item) => item.quantity > 0),
     );
 
-  const placeOrder = (details) => {
+  const placeOrder = async (details) => {
     const order = {
       id: `TUA-${String(Date.now()).slice(-5)}`,
       createdAt: new Date().toISOString(),
@@ -200,6 +251,13 @@ function App() {
       ...details,
       status: "Received",
     };
+    if (supabase) {
+      const { error } = await supabase.from("orders").insert(orderToRow(order));
+      if (error) {
+        setNotice(`Could not place order: ${error.message}`);
+        return;
+      }
+    }
     setOrders((current) => [order, ...current]);
     setTrackedId(order.id);
     setCart([]);
@@ -207,26 +265,57 @@ function App() {
     setNotice("Order received. We are on it.");
   };
 
-  const progressOrder = (id) =>
+  const progressOrder = async (id) => {
+    const order = orders.find((entry) => entry.id === id);
+    if (!order) return;
+    const steps = order.delivery ? deliverySteps : statusSteps;
+    const next =
+      steps[Math.min(steps.indexOf(order.status) + 1, steps.length - 1)];
+    if (supabase) {
+      const { error } = await supabase
+        .from("orders")
+        .update({ status: next })
+        .eq("id", id);
+      if (error) {
+        setNotice(`Could not update order: ${error.message}`);
+        return;
+      }
+    }
     setOrders((current) =>
-      current.map((order) => {
-        if (order.id !== id) return order;
-        const steps = order.delivery ? deliverySteps : statusSteps;
-        const next =
-          steps[Math.min(steps.indexOf(order.status) + 1, steps.length - 1)];
-        return { ...order, status: next };
-      }),
+      current.map((entry) =>
+        entry.id === id ? { ...entry, status: next } : entry,
+      ),
     );
+  };
 
-  const removeOrder = (id) =>
+  const removeOrder = async (id) => {
+    if (supabase) {
+      const { error } = await supabase.from("orders").delete().eq("id", id);
+      if (error) {
+        setNotice(`Could not delete order: ${error.message}`);
+        return;
+      }
+    }
     setOrders((current) => current.filter((order) => order.id !== id));
+  };
 
-  const cancelOrder = (id) =>
+  const cancelOrder = async (id) => {
+    if (supabase) {
+      const { error } = await supabase
+        .from("orders")
+        .update({ status: "Cancelled" })
+        .eq("id", id);
+      if (error) {
+        setNotice(`Could not cancel order: ${error.message}`);
+        return;
+      }
+    }
     setOrders((current) =>
       current.map((order) =>
         order.id === id ? { ...order, status: "Cancelled" } : order,
       ),
     );
+  };
 
   return (
     <div className="app-shell">
@@ -342,8 +431,8 @@ function Header({
         >
           Contact us
         </button>
-        <span className="open-status">
-          <span /> Open today · 11:30–22:00
+          <span className="open-status">
+          <span /> Open today · 08:00 to 21:00
         </span>
       </nav>
       <div className="header-actions">
@@ -415,7 +504,6 @@ function StaffPin({ onClose, onUnlock }) {
         <button className="primary-button wide" type="submit">
           Enter portal <ArrowRight size={16} />
         </button>
-        <small className="pin-hint">Demo PIN: 2468</small>
       </form>
     </div>
   );
@@ -473,7 +561,7 @@ function Home({ onExplore, onTrack }) {
           your phone.
         </p>
         <div className="strip-detail">
-          Cape Town <span>·</span> South Africa
+          Kuruman <span>·</span> South Africa
         </div>
       </section>
       <section className="featured-section" id="menu-anchor">
@@ -515,8 +603,8 @@ function Home({ onExplore, onTrack }) {
         </div>
         <div className="reservation-copy">
           <p>
-            Find us tucked away on Bree Street. Dinner is served Tuesday to
-            Sunday, with lunch from Thursday.
+            Find us in Kuruman. Get in touch for welding and fabrication
+            enquiries, quotations, and project details.
           </p>
           <button className="outline-button" onClick={onExplore}>
             Order for collection <ArrowRight size={16} />
@@ -554,12 +642,12 @@ function Contact({ onMenu }) {
         <div>
           <span className="detail-label">Find us</span>
           <h2>
-            101 Bree Street
+            TUA Welding and Fabrication
             <br />
-            Cape Town, 8001
+            Kuruman, South Africa
           </h2>
           <a
-            href="https://maps.google.com/?q=101+Bree+Street+Cape+Town"
+            href="https://maps.google.com/?q=Kuruman+South+Africa"
             target="_blank"
             rel="noreferrer"
           >
@@ -569,20 +657,22 @@ function Contact({ onMenu }) {
         <div>
           <span className="detail-label">Talk to us</span>
           <h2>
-            +27 21 422 1234
+            +27 83 318 4635
             <br />
-            hello@tua.co.za
+            uripachena@yahoo.com
           </h2>
-          <a href="mailto:hello@tua.co.za">
+          <p>Reg. Number: 2019/139951/07</p>
+          <p>Fax: 086 414 5988</p>
+          <a href="mailto:uripachena@yahoo.com">
             Send an email <ArrowRight size={15} />
           </a>
         </div>
         <div>
           <span className="detail-label">Opening hours</span>
           <h2>
-            Tue–Sun
+            Monday to Sunday
             <br />
-            11:30–22:00
+            08:00 to 21:00
           </h2>
           <p>Kitchen closes at 21:15</p>
         </div>
@@ -725,7 +815,7 @@ function Checkout({ cart, total, updateQuantity, onBack, onPlace }) {
               <Bike size={20} />
               <span>
                 <b>Deliver my order</b>
-                <small>Usually arrives in 45–60 min</small>
+                <small>Usually arrives in 45 to 60 min</small>
               </span>
               <Check size={17} />
             </button>
@@ -772,7 +862,7 @@ function Checkout({ cart, total, updateQuantity, onBack, onPlace }) {
                   onChange={(e) =>
                     setDetails({ ...details, address: e.target.value })
                   }
-                  placeholder="Street, suburb, Cape Town"
+                  placeholder="Street, suburb, Kuruman"
                 />
               </label>
             )}
@@ -1016,12 +1106,12 @@ function Tracking({ order, onMenu }) {
             {order.status === "Delivered" || order.status === "Ready"
               ? "Ready now"
               : order.delivery
-                ? "Arriving in 45–60 min"
+                ? "Arriving in 45 to 60 min"
                 : "Ready in about 25 min"}
           </span>
           <span>
             <MapPin size={16} />{" "}
-            {order.delivery ? order.address : "Tua, 101 Bree Street"}
+            {order.delivery ? order.address : "TUA, Kuruman"}
           </span>
         </div>
       </div>
