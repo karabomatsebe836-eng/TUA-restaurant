@@ -177,7 +177,7 @@ function App() {
   useEffect(() => {
     if (!supabase) return;
     let active = true;
-    supabase
+    const loadOrders = () => supabase
       .from("orders")
       .select("*")
       .order("created_at", { ascending: false })
@@ -188,8 +188,43 @@ function App() {
         }
         if (active) setOrders((data || []).map(orderFromRow));
       });
+    loadOrders();
+    const channel = supabase
+      .channel("orders-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "orders" },
+        (payload) => {
+          if (!active) return;
+          if (payload.eventType === "INSERT") {
+            setOrders((current) => {
+              if (current.some((order) => order.id === payload.new.id)) {
+                return current;
+              }
+              return [orderFromRow(payload.new), ...current];
+            });
+          }
+          if (payload.eventType === "UPDATE") {
+            setOrders((current) =>
+              current.map((order) =>
+                order.id === payload.new.id ? orderFromRow(payload.new) : order,
+              ),
+            );
+          }
+          if (payload.eventType === "DELETE") {
+            setOrders((current) =>
+              current.filter((order) => order.id !== payload.old.id),
+            );
+          }
+        },
+      )
+      .subscribe();
+    const handleFocus = () => loadOrders();
+    window.addEventListener("focus", handleFocus);
     return () => {
       active = false;
+      window.removeEventListener("focus", handleFocus);
+      supabase.removeChannel(channel);
     };
   }, []);
   useEffect(() => {

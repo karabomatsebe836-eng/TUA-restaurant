@@ -15,7 +15,22 @@ create table if not exists public.orders (
 create index if not exists orders_created_at_idx
 on public.orders (created_at);
 
+alter table public.orders replica identity full;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.orders;
+exception
+  when duplicate_object then null;
+end;
+$$;
+
 alter table public.orders enable row level security;
+
+drop policy if exists "Anyone can read orders for this demo" on public.orders;
+drop policy if exists "Anyone can create orders for this demo" on public.orders;
+drop policy if exists "Anyone can update orders for this demo" on public.orders;
+drop policy if exists "Anyone can delete orders for this demo" on public.orders;
 
 create policy "Anyone can read orders for this demo"
 on public.orders for select
@@ -45,6 +60,8 @@ as $$
 $$;
 
 -- Enable pg_cron under Database > Extensions before running this statement.
+select cron.unschedule('delete-orders-after-15-days');
+
 select cron.schedule(
   'delete-orders-after-15-days',
   '0 2 * * *',
