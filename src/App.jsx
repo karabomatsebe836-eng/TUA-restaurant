@@ -32,7 +32,7 @@ const seedMenu = [
     price: 92,
     image:
       "https://images.unsplash.com/photo-1619096252214-ef06c45683e3?auto=format&fit=crop&w=900&q=85",
-    tag: "Plant-based",
+    tag: "Plant based",
   },
   {
     id: "m2",
@@ -56,12 +56,12 @@ const seedMenu = [
   {
     id: "m4",
     category: "Mains",
-    name: "Miso-glazed cauliflower",
+    name: "Miso glazed cauliflower",
     description: "Whipped feta, crispy rice, burnt spring onion",
     price: 165,
     image:
       "https://images.unsplash.com/photo-1565299507177-b0ac66763828?auto=format&fit=crop&w=900&q=85",
-    tag: "Plant-based",
+    tag: "Plant based",
   },
   {
     id: "m5",
@@ -98,11 +98,17 @@ const seedMenu = [
     price: 54,
     image:
       "https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=900&q=85",
-    tag: "Zero-proof",
+    tag: "Zero proof",
   },
 ];
 
-const statusSteps = ["Received", "Approved", "Being Prepared", "Ready"];
+const statusSteps = [
+  "Received",
+  "Approved",
+  "Being Prepared",
+  "Ready",
+  "Collected",
+];
 
 const deliverySteps = [
   "Received",
@@ -151,14 +157,19 @@ function orderToRow(order) {
     total: order.total,
     status: order.status,
     items: order.items,
+    tracking_token: order.trackingToken,
   };
 }
 
 function App() {
   const [menu, setMenu] = useState(() => loadStored("tua-menu", seedMenu));
 
-  // Orders are NOT loaded from localStorage anymore.
-  const [orders, setOrders] = useState([]);
+  // Keep only this customer's own current order in the browser.
+  // Staff orders are loaded securely from Supabase after staff authentication.
+  const [orders, setOrders] = useState(() => {
+    const savedOrder = loadStored("tua-current-order", null);
+    return savedOrder ? [savedOrder] : [];
+  });
 
   const [cart, setCart] = useState([]);
   const [view, setView] = useState("home");
@@ -166,7 +177,12 @@ function App() {
   const [staffOpen, setStaffOpen] = useState(false);
   const [pinOpen, setPinOpen] = useState(false);
   const [notice, setNotice] = useState("");
-  const [trackedId, setTrackedId] = useState(null);
+  const [trackedId, setTrackedId] = useState(
+    () => loadStored("tua-order-tracking", null)?.id || null,
+  );
+  const [trackingToken, setTrackingToken] = useState(
+    () => loadStored("tua-order-tracking", null)?.trackingToken || null,
+  );
 
   useEffect(() => {
     localStorage.setItem("tua-menu", JSON.stringify(menu));
@@ -256,6 +272,61 @@ function App() {
     };
   }, [staffOpen]);
 
+  // Customers do not need an account or login.
+  // Their browser uses the private tracking token created with the order
+  // to check only that order's status every 3 seconds.
+  useEffect(() => {
+    if (!supabase || !trackedId || !trackingToken) return;
+
+    let active = true;
+
+    const refreshOrderStatus = async () => {
+      const { data, error } = await supabase.rpc("get_order_status", {
+        p_order_id: trackedId,
+        p_tracking_token: trackingToken,
+      });
+
+      if (!active || error) return;
+
+      const statusRow = Array.isArray(data) ? data[0] : data;
+
+      if (!statusRow) return;
+
+      setOrders((current) =>
+        current.map((order) => {
+          if (order.id !== trackedId) {
+            return order;
+          }
+
+          const updatedOrder = {
+            ...order,
+            status: statusRow.status,
+            createdAt: statusRow.created_at || order.createdAt,
+          };
+
+          localStorage.setItem(
+            "tua-current-order",
+            JSON.stringify(updatedOrder),
+          );
+
+          return updatedOrder;
+        }),
+      );
+    };
+
+    refreshOrderStatus();
+
+    const interval = window.setInterval(refreshOrderStatus, 3000);
+
+    window.addEventListener("focus", refreshOrderStatus);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshOrderStatus);
+    };
+  }, [trackedId, trackingToken]);
+
   useEffect(() => {
     if (!notice) return;
 
@@ -265,6 +336,44 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [notice]);
+
+  // Restore the staff session so staff do not have to re-enter the PIN
+  // after every new incoming order or a normal page refresh.
+  useEffect(() => {
+    if (!supabase) return;
+
+    let active = true;
+
+    const restoreStaffSession = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (
+        active &&
+        session?.user?.email?.toLowerCase() === STAFF_EMAIL.toLowerCase()
+      ) {
+        setStaffOpen(true);
+      }
+    };
+
+    restoreStaffSession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (
+        session?.user?.email?.toLowerCase() === STAFF_EMAIL.toLowerCase()
+      ) {
+        setStaffOpen(true);
+      }
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   const categories = ["All", ...new Set(menu.map((item) => item.category))];
 
@@ -283,8 +392,7 @@ function App() {
     0,
   );
 
-  // A normal customer can only track the order created
-  // in their current session.
+  // A normal customer can only track the order saved in this browser.
   const activeOrder = trackedId
     ? orders.find((order) => order.id === trackedId)
     : null;
@@ -332,6 +440,13 @@ function App() {
   };
 
   const placeOrder = async (details) => {
+    if (!supabase) {
+      setNotice("Could not connect to the ordering system.");
+      return;
+    }
+
+    const newTrackingToken = crypto.randomUUID();
+
     const order = {
       id: `TUA-${String(Date.now()).slice(-5)}`,
       createdAt: new Date().toISOString(),
@@ -339,26 +454,49 @@ function App() {
       total: cartTotal,
       ...details,
       status: "Received",
+      trackingToken: newTrackingToken,
     };
 
-    if (supabase) {
-      const { error } = await supabase
-        .from("orders")
-        .insert(orderToRow(order));
+    const { error } = await supabase
+      .from("orders")
+      .insert(orderToRow(order));
 
-      if (error) {
-        setNotice(`Could not place order: ${error.message}`);
-        return;
-      }
+    if (error) {
+      setNotice(`Could not place order: ${error.message}`);
+      return;
     }
 
-    // Keep only this customer's order in local React state.
-    setOrders([order]);
+    // Store only the information this customer's own browser needs
+    // for order tracking. The staff-only customer data remains in Supabase.
+    const customerOrder = {
+      id: order.id,
+      createdAt: order.createdAt,
+      items: order.items,
+      total: order.total,
+      delivery: order.delivery,
+      address: order.address || "",
+      status: order.status,
+    };
 
+    setOrders([customerOrder]);
     setTrackedId(order.id);
+    setTrackingToken(newTrackingToken);
+
+    localStorage.setItem(
+      "tua-order-tracking",
+      JSON.stringify({
+        id: order.id,
+        trackingToken: newTrackingToken,
+      }),
+    );
+
+    localStorage.setItem(
+      "tua-current-order",
+      JSON.stringify(customerOrder),
+    );
+
     setCart([]);
     setView("tracking");
-
     setNotice("Order received. We are on it.");
   };
 
@@ -806,7 +944,7 @@ function Home({
           </h1>
 
           <p className="hero-intro">
-            A warm, open-kitchen restaurant
+            A warm, open kitchen restaurant
             serving food with a little fire
             in its belly. Come as you are,
             stay for dessert.
@@ -1811,19 +1949,21 @@ function Tracking({
             <p>
               {order.status === "Received"
                 ? "Your order has landed safely in our kitchen."
-                : order.status ===
-                    "Being Prepared"
-                  ? "Our kitchen is making your order with care."
-                  : order.status ===
-                      "Ready"
-                    ? "Come on in, your order is ready."
-                    : order.status ===
-                        "Out for Delivery"
-                      ? "Your order is on its way to you."
-                      : order.status ===
-                          "Cancelled"
-                        ? "This order has been cancelled."
-                        : "Enjoy every bite."}
+                : order.status === "Approved"
+                  ? "Your order has been approved and is waiting for the kitchen."
+                  : order.status === "Being Prepared"
+                    ? "Our kitchen is making your order with care."
+                    : order.status === "Ready"
+                      ? "Come on in, your order is ready."
+                      : order.status === "Collected"
+                        ? "Your order has been collected. Enjoy every bite."
+                      : order.status === "Out for Delivery"
+                        ? "Your order is on its way to you."
+                        : order.status === "Delivered"
+                          ? "Your order has been delivered. Enjoy every bite."
+                          : order.status === "Cancelled"
+                            ? "This order has been cancelled."
+                            : "We are keeping you updated."}
             </p>
           </div>
 
@@ -1874,7 +2014,8 @@ function Tracking({
 
             {order.status ===
               "Delivered" ||
-            order.status === "Ready"
+            order.status === "Ready" ||
+            order.status === "Collected"
               ? " Ready now"
               : order.delivery
                 ? " Arriving in 45 to 60 min"
@@ -2008,6 +2149,7 @@ function StaffPortal({
         ![
           "Delivered",
           "Ready",
+          "Collected",
           "Cancelled",
         ].includes(order.status),
     );
@@ -2051,6 +2193,7 @@ function StaffPortal({
           "Ready",
           "Out for Delivery",
           "Delivered",
+          "Collected",
         ].includes(order.status),
     ).length;
 
@@ -2382,7 +2525,9 @@ function OrderMonitor({
                               "Being Prepared"
                               ? "Mark out for delivery"
                               : "Mark delivered"
-                            : "Mark ready"}
+                            : order.status === "Ready"
+                              ? "Mark collected"
+                              : "Mark ready"}
 
                       <ArrowRight
                         size={15}
