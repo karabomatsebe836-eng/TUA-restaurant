@@ -1,13 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Bike,
   Check,
-  ChevronDown,
   Clock3,
   Coffee,
-  Flame,
-  Leaf,
   MapPin,
   Minus,
   PackageCheck,
@@ -23,6 +20,8 @@ import {
   CircleDot,
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
+
+const STAFF_EMAIL = "uripachena@yahoo.com";
 
 const seedMenu = [
   {
@@ -104,6 +103,7 @@ const seedMenu = [
 ];
 
 const statusSteps = ["Received", "Approved", "Being Prepared", "Ready"];
+
 const deliverySteps = [
   "Received",
   "Approved",
@@ -111,6 +111,7 @@ const deliverySteps = [
   "Out for Delivery",
   "Delivered",
 ];
+
 const money = (value) => `R${value.toLocaleString("en-ZA")}`;
 
 function loadStored(key, fallback) {
@@ -125,7 +126,7 @@ function orderFromRow(row) {
   return {
     id: row.id,
     createdAt: row.created_at,
-    items: row.items,
+    items: Array.isArray(row.items) ? row.items : [],
     total: Number(row.total),
     name: row.customer_name,
     phone: row.phone,
@@ -155,7 +156,10 @@ function orderToRow(order) {
 
 function App() {
   const [menu, setMenu] = useState(() => loadStored("tua-menu", seedMenu));
-  const [orders, setOrders] = useState(() => loadStored("tua-orders", []));
+
+  // Orders are NOT loaded from localStorage anymore.
+  const [orders, setOrders] = useState([]);
+
   const [cart, setCart] = useState([]);
   const [view, setView] = useState("home");
   const [category, setCategory] = useState("All");
@@ -163,54 +167,73 @@ function App() {
   const [pinOpen, setPinOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [trackedId, setTrackedId] = useState(null);
-  const [user, setUser] = useState(() => loadStored("tua-user", null));
-  const [loginOpen, setLoginOpen] = useState(false);
 
-  useEffect(
-    () => localStorage.setItem("tua-menu", JSON.stringify(menu)),
-    [menu],
-  );
-  useEffect(
-    () => localStorage.setItem("tua-orders", JSON.stringify(orders)),
-    [orders],
-  );
   useEffect(() => {
-    if (!supabase) return;
+    localStorage.setItem("tua-menu", JSON.stringify(menu));
+  }, [menu]);
+
+  // Remove customer order information that older versions
+  // of the website may have stored in this browser.
+  useEffect(() => {
+    localStorage.removeItem("tua-orders");
+  }, []);
+
+  // Load ALL restaurant orders only while the staff portal is open.
+  useEffect(() => {
+    if (!supabase || !staffOpen) return;
+
     let active = true;
-    const loadOrders = () => supabase
-      .from("orders")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
-        if (error) {
-          setNotice(`Could not load orders: ${error.message}`);
-          return;
-        }
-        if (active) setOrders((data || []).map(orderFromRow));
-      });
+
+    const loadOrders = async () => {
+      const { data, error } = await supabase
+        .from("orders")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        setNotice(`Could not load orders: ${error.message}`);
+        return;
+      }
+
+      if (active) {
+        setOrders((data || []).map(orderFromRow));
+      }
+    };
+
     loadOrders();
+
     const channel = supabase
       .channel("orders-live")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "orders" },
+        {
+          event: "*",
+          schema: "public",
+          table: "orders",
+        },
         (payload) => {
           if (!active) return;
+
           if (payload.eventType === "INSERT") {
             setOrders((current) => {
               if (current.some((order) => order.id === payload.new.id)) {
                 return current;
               }
+
               return [orderFromRow(payload.new), ...current];
             });
           }
+
           if (payload.eventType === "UPDATE") {
             setOrders((current) =>
               current.map((order) =>
-                order.id === payload.new.id ? orderFromRow(payload.new) : order,
+                order.id === payload.new.id
+                  ? orderFromRow(payload.new)
+                  : order,
               ),
             );
           }
+
           if (payload.eventType === "DELETE") {
             setOrders((current) =>
               current.filter((order) => order.id !== payload.old.id),
@@ -219,63 +242,94 @@ function App() {
         },
       )
       .subscribe();
-    const handleFocus = () => loadOrders();
+
+    const handleFocus = () => {
+      loadOrders();
+    };
+
     window.addEventListener("focus", handleFocus);
+
     return () => {
       active = false;
       window.removeEventListener("focus", handleFocus);
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [staffOpen]);
+
   useEffect(() => {
-    if (user) localStorage.setItem("tua-user", JSON.stringify(user));
-  }, [user]);
-  useEffect(() => {
-    if (notice) {
-      const timer = setTimeout(() => setNotice(""), 2600);
-      return () => clearTimeout(timer);
-    }
+    if (!notice) return;
+
+    const timer = setTimeout(() => {
+      setNotice("");
+    }, 2600);
+
+    return () => clearTimeout(timer);
   }, [notice]);
 
   const categories = ["All", ...new Set(menu.map((item) => item.category))];
+
   const visibleMenu =
     category === "All"
       ? menu
       : menu.filter((item) => item.category === category);
-  const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+
+  const cartCount = cart.reduce(
+    (sum, item) => sum + item.quantity,
+    0,
+  );
+
   const cartTotal = cart.reduce(
     (sum, item) => sum + item.price * item.quantity,
     0,
   );
+
+  // A normal customer can only track the order created
+  // in their current session.
   const activeOrder = trackedId
     ? orders.find((order) => order.id === trackedId)
-    : orders[0];
-  const userOrders = user
-    ? orders.filter((order) => order.userId === user.id)
-    : [];
+    : null;
 
   const addToCart = (item) => {
     setCart((current) => {
-      const existing = current.find((entry) => entry.id === item.id);
+      const existing = current.find(
+        (entry) => entry.id === item.id,
+      );
+
       return existing
         ? current.map((entry) =>
             entry.id === item.id
-              ? { ...entry, quantity: entry.quantity + 1 }
+              ? {
+                  ...entry,
+                  quantity: entry.quantity + 1,
+                }
               : entry,
           )
-        : [...current, { ...item, quantity: 1 }];
+        : [
+            ...current,
+            {
+              ...item,
+              quantity: 1,
+            },
+          ];
     });
+
     setNotice(`${item.name} added to your order`);
   };
 
-  const updateQuantity = (id, amount) =>
+  const updateQuantity = (id, amount) => {
     setCart((current) =>
       current
         .map((item) =>
-          item.id === id ? { ...item, quantity: item.quantity + amount } : item,
+          item.id === id
+            ? {
+                ...item,
+                quantity: item.quantity + amount,
+              }
+            : item,
         )
         .filter((item) => item.quantity > 0),
     );
+  };
 
   const placeOrder = async (details) => {
     const order = {
@@ -286,70 +340,138 @@ function App() {
       ...details,
       status: "Received",
     };
+
     if (supabase) {
-      const { error } = await supabase.from("orders").insert(orderToRow(order));
+      const { error } = await supabase
+        .from("orders")
+        .insert(orderToRow(order));
+
       if (error) {
         setNotice(`Could not place order: ${error.message}`);
         return;
       }
     }
-    setOrders((current) => [order, ...current]);
+
+    // Keep only this customer's order in local React state.
+    setOrders([order]);
+
     setTrackedId(order.id);
     setCart([]);
     setView("tracking");
+
     setNotice("Order received. We are on it.");
   };
 
   const progressOrder = async (id) => {
-    const order = orders.find((entry) => entry.id === id);
+    const order = orders.find(
+      (entry) => entry.id === id,
+    );
+
     if (!order) return;
-    const steps = order.delivery ? deliverySteps : statusSteps;
+
+    const steps = order.delivery
+      ? deliverySteps
+      : statusSteps;
+
     const next =
-      steps[Math.min(steps.indexOf(order.status) + 1, steps.length - 1)];
+      steps[
+        Math.min(
+          steps.indexOf(order.status) + 1,
+          steps.length - 1,
+        )
+      ];
+
     if (supabase) {
       const { error } = await supabase
         .from("orders")
-        .update({ status: next })
+        .update({
+          status: next,
+        })
         .eq("id", id);
+
       if (error) {
         setNotice(`Could not update order: ${error.message}`);
         return;
       }
     }
+
     setOrders((current) =>
       current.map((entry) =>
-        entry.id === id ? { ...entry, status: next } : entry,
+        entry.id === id
+          ? {
+              ...entry,
+              status: next,
+            }
+          : entry,
       ),
     );
   };
 
   const removeOrder = async (id) => {
     if (supabase) {
-      const { error } = await supabase.from("orders").delete().eq("id", id);
+      const { error } = await supabase
+        .from("orders")
+        .delete()
+        .eq("id", id);
+
       if (error) {
         setNotice(`Could not delete order: ${error.message}`);
         return;
       }
     }
-    setOrders((current) => current.filter((order) => order.id !== id));
+
+    setOrders((current) =>
+      current.filter((order) => order.id !== id),
+    );
   };
 
   const cancelOrder = async (id) => {
     if (supabase) {
       const { error } = await supabase
         .from("orders")
-        .update({ status: "Cancelled" })
+        .update({
+          status: "Cancelled",
+        })
         .eq("id", id);
+
       if (error) {
         setNotice(`Could not cancel order: ${error.message}`);
         return;
       }
     }
+
     setOrders((current) =>
       current.map((order) =>
-        order.id === id ? { ...order, status: "Cancelled" } : order,
+        order.id === id
+          ? {
+              ...order,
+              status: "Cancelled",
+            }
+          : order,
       ),
     );
+  };
+
+  const closeStaffPortal = async () => {
+    setStaffOpen(false);
+
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+
+    // Once staff closes the portal, remove everybody else's
+    // orders from the browser memory.
+    setOrders((current) => {
+      if (!trackedId) {
+        return [];
+      }
+
+      const trackedOrder = current.find(
+        (order) => order.id === trackedId,
+      );
+
+      return trackedOrder ? [trackedOrder] : [];
+    });
   };
 
   return (
@@ -361,18 +483,28 @@ function App() {
         onStaff={() => setPinOpen(true)}
         onHome={() => setView("home")}
         onMenu={() => setView("menu")}
-        onTracking={() => setView(activeOrder ? "tracking" : "menu")}
+        onTracking={() =>
+          setView(activeOrder ? "tracking" : "menu")
+        }
         onContact={() => setView("contact")}
       />
+
       {view === "home" && (
         <Home
           onExplore={() => {
             setView("menu");
-            window.scrollTo({ top: 0, behavior: "smooth" });
+
+            window.scrollTo({
+              top: 0,
+              behavior: "smooth",
+            });
           }}
-          onTrack={() => setView(activeOrder ? "tracking" : "menu")}
+          onTrack={() =>
+            setView(activeOrder ? "tracking" : "menu")
+          }
         />
       )}
+
       {view === "menu" && (
         <MenuPage
           menu={visibleMenu}
@@ -383,6 +515,7 @@ function App() {
           onCart={() => setView("checkout")}
         />
       )}
+
       {view === "checkout" && (
         <Checkout
           cart={cart}
@@ -392,10 +525,18 @@ function App() {
           onPlace={placeOrder}
         />
       )}
+
       {view === "tracking" && (
-        <Tracking order={activeOrder} onMenu={() => setView("menu")} />
+        <Tracking
+          order={activeOrder}
+          onMenu={() => setView("menu")}
+        />
       )}
-      {view === "contact" && <Contact onMenu={() => setView("menu")} />}
+
+      {view === "contact" && (
+        <Contact onMenu={() => setView("menu")} />
+      )}
+
       {pinOpen && (
         <StaffPin
           onClose={() => setPinOpen(false)}
@@ -405,6 +546,7 @@ function App() {
           }}
         />
       )}
+
       {staffOpen && (
         <StaffPortal
           menu={menu}
@@ -413,9 +555,10 @@ function App() {
           progressOrder={progressOrder}
           removeOrder={removeOrder}
           cancelOrder={cancelOrder}
-          close={() => setStaffOpen(false)}
+          close={closeStaffPortal}
         />
       )}
+
       {notice && (
         <div className="toast">
           <Check size={16} />
@@ -438,9 +581,13 @@ function Header({
 }) {
   return (
     <header className="site-header">
-      <button className="wordmark" onClick={onHome}>
+      <button
+        className="wordmark"
+        onClick={onHome}
+      >
         tua<span>.</span>
       </button>
+
       <nav>
         <button
           className={view === "home" ? "nav-active" : ""}
@@ -448,56 +595,120 @@ function Header({
         >
           Our story
         </button>
+
         <button
           className={view === "menu" ? "nav-active" : ""}
           onClick={onMenu}
         >
           Menu
         </button>
+
         <button
-          className={view === "tracking" ? "nav-active" : ""}
+          className={
+            view === "tracking"
+              ? "nav-active"
+              : ""
+          }
           onClick={onTracking}
         >
           Live updates
         </button>
+
         <button
-          className={view === "contact" ? "nav-active" : ""}
+          className={
+            view === "contact"
+              ? "nav-active"
+              : ""
+          }
           onClick={onContact}
         >
           Contact us
         </button>
-          <span className="open-status">
-          <span /> Open today · 08:00 to 21:00
+
+        <span className="open-status">
+          <span />
+          Open today · 08:00 to 21:00
         </span>
       </nav>
+
       <div className="header-actions">
-        <button className="staff-link" onClick={onStaff}>
-          <LockKeyhole size={14} /> Staff portal
+        <button
+          className="staff-link"
+          onClick={onStaff}
+        >
+          <LockKeyhole size={14} />
+          Staff portal
         </button>
-        <button className="cart-button" onClick={onCart}>
+
+        <button
+          className="cart-button"
+          onClick={onCart}
+        >
           <ShoppingBag size={18} />
           <span>Checkout</span>
-          {cartCount > 0 && <b>{cartCount}</b>}
+
+          {cartCount > 0 && (
+            <b>{cartCount}</b>
+          )}
         </button>
       </div>
     </header>
   );
 }
 
-function StaffPin({ onClose, onUnlock }) {
+function StaffPin({
+  onClose,
+  onUnlock,
+}) {
   const [pin, setPin] = useState("");
-  const [error, setError] = useState(false);
-  const submit = (event) => {
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (event) => {
     event.preventDefault();
-    if (pin === "2468") onUnlock();
-    else {
-      setError(true);
-      setPin("");
+
+    setError("");
+
+    if (!supabase) {
+      setError(
+        "Database connection is not available.",
+      );
+      return;
     }
+
+    if (!pin.trim()) {
+      setError("Please enter the staff PIN.");
+      return;
+    }
+
+    setLoading(true);
+
+    const { error: signInError } =
+      await supabase.auth.signInWithPassword({
+        email: STAFF_EMAIL,
+        password: pin,
+      });
+
+    setLoading(false);
+
+    if (signInError) {
+      setError(
+        "Incorrect staff PIN. Try again.",
+      );
+
+      setPin("");
+      return;
+    }
+
+    onUnlock();
   };
+
   return (
     <div className="pin-backdrop">
-      <form className="pin-modal" onSubmit={submit}>
+      <form
+        className="pin-modal"
+        onSubmit={submit}
+      >
         <button
           type="button"
           className="icon-button pin-close"
@@ -506,53 +717,86 @@ function StaffPin({ onClose, onUnlock }) {
         >
           <X size={18} />
         </button>
+
         <div className="pin-icon">
           <LockKeyhole size={20} />
         </div>
-        <p className="eyebrow">Tua / Staff access</p>
+
+        <p className="eyebrow">
+          Tua / Staff access
+        </p>
+
         <h2>
           Unlock the
           <br />
           <em>staff portal.</em>
         </h2>
+
         <p className="pin-copy">
-          Enter the shared team PIN to view orders and manage the menu.
+          Enter the staff PIN to view and
+          manage orders.
         </p>
+
         <label>
           Access PIN
+
           <input
             autoFocus
             inputMode="numeric"
-            maxLength="4"
             type="password"
             value={pin}
             onChange={(event) => {
-              setPin(event.target.value.replace(/\D/g, ""));
-              setError(false);
+              setPin(
+                event.target.value.replace(
+                  /\D/g,
+                  "",
+                ),
+              );
+
+              setError("");
             }}
-            placeholder="••••"
+            placeholder="••••••"
           />
         </label>
+
         {error && (
-          <p className="pin-error">That PIN does not match. Try again.</p>
+          <p className="pin-error">
+            {error}
+          </p>
         )}
-        <button className="primary-button wide" type="submit">
-          Enter portal <ArrowRight size={16} />
+
+        <button
+          className="primary-button wide"
+          type="submit"
+          disabled={loading}
+        >
+          {loading
+            ? "Checking..."
+            : "Enter portal"}
+
+          {!loading && (
+            <ArrowRight size={16} />
+          )}
         </button>
       </form>
     </div>
   );
 }
 
-function Home({ onExplore, onTrack }) {
+function Home({
+  onExplore,
+  onTrack,
+}) {
   return (
     <main>
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">
-            <span className="eyebrow-line" /> A neighbourhood table in the heart
-            of the city
+            <span className="eyebrow-line" />
+            A neighbourhood table in the
+            heart of the city
           </p>
+
           <h1>
             Good food.
             <br />
@@ -560,89 +804,158 @@ function Home({ onExplore, onTrack }) {
             <br />
             Good times.
           </h1>
+
           <p className="hero-intro">
-            A warm, open-kitchen restaurant serving food with a little fire in
-            its belly. Come as you are, stay for dessert.
+            A warm, open-kitchen restaurant
+            serving food with a little fire
+            in its belly. Come as you are,
+            stay for dessert.
           </p>
+
           <div className="hero-actions">
-            <button className="primary-button" onClick={onExplore}>
-              Explore the menu <ArrowRight size={17} />
+            <button
+              className="primary-button"
+              onClick={onExplore}
+            >
+              Explore the menu
+              <ArrowRight size={17} />
             </button>
-            <button className="text-button" onClick={onTrack}>
-              Track an order <CircleDot size={16} />
+
+            <button
+              className="text-button"
+              onClick={onTrack}
+            >
+              Track an order
+              <CircleDot size={16} />
             </button>
           </div>
         </div>
+
         <div className="hero-image">
           <img
             src="https://images.unsplash.com/photo-1515003197210-e0cd71810b5f?auto=format&fit=crop&w=1500&q=90"
             alt="A colourful table of shared dishes at Tua"
           />
+
           <div className="image-note">
             <span>01</span>
+
             <div>
-              <strong>Made for sharing</strong>
-              <small>Seasonal plates, generous pours</small>
+              <strong>
+                Made for sharing
+              </strong>
+
+              <small>
+                Seasonal plates, generous
+                pours
+              </small>
             </div>
           </div>
         </div>
       </section>
+
       <section className="intro-strip">
         <div className="intro-mark">
-          <Sparkles size={18} /> Est. 2018
+          <Sparkles size={18} />
+          Est. 2018
         </div>
+
         <p>
-          We believe the best meals are the ones that make you forget to check
+          We believe the best meals are the
+          ones that make you forget to check
           your phone.
         </p>
+
         <div className="strip-detail">
           Kuruman <span>·</span> South Africa
         </div>
       </section>
-      <section className="featured-section" id="menu-anchor">
+
+      <section
+        className="featured-section"
+        id="menu-anchor"
+      >
         <div className="section-heading">
           <div>
-            <p className="eyebrow">From our kitchen</p>
+            <p className="eyebrow">
+              From our kitchen
+            </p>
+
             <h2>A few favourites</h2>
           </div>
-          <button className="text-button" onClick={onExplore}>
-            View full menu <ArrowRight size={16} />
+
+          <button
+            className="text-button"
+            onClick={onExplore}
+          >
+            View full menu
+            <ArrowRight size={16} />
           </button>
         </div>
+
         <div className="featured-grid">
-          {seedMenu.slice(0, 3).map((item, index) => (
-            <article className="featured-card" key={item.id}>
-              <div className="featured-image">
-                <img src={item.image} alt={item.name} />
-                <span>0{index + 1}</span>
-              </div>
-              <div className="featured-meta">
-                <div>
-                  <h3>{item.name}</h3>
-                  <p>{item.description}</p>
+          {seedMenu
+            .slice(0, 3)
+            .map((item, index) => (
+              <article
+                className="featured-card"
+                key={item.id}
+              >
+                <div className="featured-image">
+                  <img
+                    src={item.image}
+                    alt={item.name}
+                  />
+
+                  <span>
+                    0{index + 1}
+                  </span>
                 </div>
-                <strong>{money(item.price)}</strong>
-              </div>
-            </article>
-          ))}
+
+                <div className="featured-meta">
+                  <div>
+                    <h3>{item.name}</h3>
+                    <p>
+                      {item.description}
+                    </p>
+                  </div>
+
+                  <strong>
+                    {money(item.price)}
+                  </strong>
+                </div>
+              </article>
+            ))}
         </div>
       </section>
+
       <section className="reservation-band">
         <div>
-          <p className="eyebrow">Come sit with us</p>
+          <p className="eyebrow">
+            Come sit with us
+          </p>
+
           <h2>
             There is always room
             <br />
             <em>at our table.</em>
           </h2>
         </div>
+
         <div className="reservation-copy">
           <p>
-            Find us in Kuruman. Get in touch for welding and fabrication
-            enquiries, quotations, and project details.
+            Find us in Kuruman. Get in touch
+            for welding and fabrication
+            enquiries, quotations, and
+            project details.
           </p>
-          <button className="outline-button" onClick={onExplore}>
-            Order for collection <ArrowRight size={16} />
+
+          <button
+            className="outline-button"
+            onClick={onExplore}
+          >
+            Order for collection
+            <ArrowRight size={16} />
           </button>
         </div>
       </section>
@@ -650,22 +963,31 @@ function Home({ onExplore, onTrack }) {
   );
 }
 
-function Contact({ onMenu }) {
+function Contact({
+  onMenu,
+}) {
   return (
     <main className="contact-page">
       <section className="contact-hero">
         <div>
-          <p className="eyebrow">Come say hello</p>
+          <p className="eyebrow">
+            Come say hello
+          </p>
+
           <h1>
             Good food is
             <br />
             <em>better together.</em>
           </h1>
+
           <p className="contact-lede">
-            Whether you are joining us for a long lunch, collecting dinner, or
-            simply have a question, we would love to hear from you.
+            Whether you are joining us for a
+            long lunch, collecting dinner,
+            or simply have a question, we
+            would love to hear from you.
           </p>
         </div>
+
         <div className="contact-image">
           <img
             src="https://images.unsplash.com/photo-1515003197210-e0cd71810b5f?auto=format&fit=crop&w=1200&q=85"
@@ -673,56 +995,88 @@ function Contact({ onMenu }) {
           />
         </div>
       </section>
+
       <section className="contact-details">
         <div>
-          <span className="detail-label">Find us</span>
+          <span className="detail-label">
+            Find us
+          </span>
+
           <h2>
             TUA Welding and Fabrication
             <br />
             Kuruman, South Africa
           </h2>
+
           <a
             href="https://maps.google.com/?q=Kuruman+South+Africa"
             target="_blank"
             rel="noreferrer"
           >
-            Open in maps <ArrowRight size={15} />
+            Open in maps
+            <ArrowRight size={15} />
           </a>
         </div>
+
         <div>
-          <span className="detail-label">Talk to us</span>
+          <span className="detail-label">
+            Talk to us
+          </span>
+
           <h2>
             +27 83 318 4635
             <br />
             uripachena@yahoo.com
           </h2>
-          <p>Reg. Number: 2019/139951/07</p>
+
+          <p>
+            Reg. Number: 2019/139951/07
+          </p>
+
           <p>Fax: 086 414 5988</p>
+
           <a href="mailto:uripachena@yahoo.com">
-            Send an email <ArrowRight size={15} />
+            Send an email
+            <ArrowRight size={15} />
           </a>
         </div>
+
         <div>
-          <span className="detail-label">Opening hours</span>
+          <span className="detail-label">
+            Opening hours
+          </span>
+
           <h2>
             Monday to Sunday
             <br />
             08:00 to 21:00
           </h2>
-          <p>Kitchen closes at 21:15</p>
+
+          <p>
+            Kitchen closes at 21:15
+          </p>
         </div>
       </section>
+
       <section className="contact-footer">
         <div>
-          <p className="eyebrow">Hungry already?</p>
+          <p className="eyebrow">
+            Hungry already?
+          </p>
+
           <h2>
             Let us make
             <br />
             <em>you something.</em>
           </h2>
         </div>
-        <button className="primary-button" onClick={onMenu}>
-          Order from Tua <ArrowRight size={17} />
+
+        <button
+          className="primary-button"
+          onClick={onMenu}
+        >
+          Order from Tua
+          <ArrowRight size={17} />
         </button>
       </section>
     </main>
@@ -740,53 +1094,90 @@ function MenuPage({
   return (
     <main className="menu-page">
       <div className="page-intro">
-        <p className="eyebrow">The good stuff</p>
+        <p className="eyebrow">
+          The good stuff
+        </p>
+
         <h1>
           Eat well,
           <br />
           <em>feel good.</em>
         </h1>
+
         <p>
-          Our menu moves with the seasons, but the feeling stays the same:
-          generous, considered, and just a little bit unexpected.
+          Our menu moves with the seasons,
+          but the feeling stays the same:
+          generous, considered, and just a
+          little bit unexpected.
         </p>
       </div>
+
       <div className="menu-toolbar">
         <div className="category-tabs">
           {categories.map((item) => (
             <button
-              className={category === item ? "active" : ""}
-              onClick={() => setCategory(item)}
+              className={
+                category === item
+                  ? "active"
+                  : ""
+              }
+              onClick={() =>
+                setCategory(item)
+              }
               key={item}
             >
               {item}
             </button>
           ))}
         </div>
-          <button className="cart-summary" onClick={onCart}>
-            <ShoppingBag size={16} /> Checkout <span>→</span>
+
+        <button
+          className="cart-summary"
+          onClick={onCart}
+        >
+          <ShoppingBag size={16} />
+          Checkout <span>→</span>
         </button>
       </div>
+
       <div className="menu-grid">
         {menu.map((item) => (
-          <article className="menu-card" key={item.id}>
+          <article
+            className="menu-card"
+            key={item.id}
+          >
             <div className="menu-card-image">
-              <img src={item.image} alt={item.name} />
-              {item.tag && <span className="dish-tag">{item.tag}</span>}
+              <img
+                src={item.image}
+                alt={item.name}
+              />
+
+              {item.tag && (
+                <span className="dish-tag">
+                  {item.tag}
+                </span>
+              )}
+
               <button
                 className="add-button"
-                onClick={() => addToCart(item)}
+                onClick={() =>
+                  addToCart(item)
+                }
                 aria-label={`Add ${item.name}`}
               >
                 <Plus size={20} />
               </button>
             </div>
+
             <div className="menu-card-copy">
               <div>
                 <h3>{item.name}</h3>
                 <p>{item.description}</p>
               </div>
-              <strong>{money(item.price)}</strong>
+
+              <strong>
+                {money(item.price)}
+              </strong>
             </div>
           </article>
         ))}
@@ -795,7 +1186,13 @@ function MenuPage({
   );
 }
 
-function Checkout({ cart, total, updateQuantity, onBack, onPlace }) {
+function Checkout({
+  cart,
+  total,
+  updateQuantity,
+  onBack,
+  onPlace,
+}) {
   const [details, setDetails] = useState({
     name: "",
     phone: "",
@@ -808,198 +1205,397 @@ function Checkout({ cart, total, updateQuantity, onBack, onPlace }) {
     cardExpiry: "",
     cardCVV: "",
   });
+
   const canSubmit =
     details.name.trim() &&
     details.phone.trim() &&
-    (!details.delivery || details.address.trim()) &&
+    (!details.delivery ||
+      details.address.trim()) &&
     details.payment &&
     (details.payment === "cash" ||
       (details.cardName.trim() &&
-        details.cardNumber.replace(/\s/g, "").length === 16 &&
+        details.cardNumber
+          .replace(/\s/g, "")
+          .length === 16 &&
         details.cardExpiry.trim() &&
         details.cardCVV.trim()));
+
   return (
     <main className="checkout-page">
-      <button className="back-button" onClick={onBack}>
+      <button
+        className="back-button"
+        onClick={onBack}
+      >
         ← Back to menu
       </button>
+
       <div className="checkout-layout">
         <section>
-          <p className="eyebrow">Almost there</p>
+          <p className="eyebrow">
+            Almost there
+          </p>
+
           <h1>
             Your order,
             <br />
             <em>your way.</em>
           </h1>
+
           <div className="fulfilment-toggle">
             <button
-              className={!details.delivery ? "selected" : ""}
-              onClick={() => setDetails({ ...details, delivery: false })}
+              type="button"
+              className={
+                !details.delivery
+                  ? "selected"
+                  : ""
+              }
+              onClick={() =>
+                setDetails({
+                  ...details,
+                  delivery: false,
+                })
+              }
             >
               <ShoppingBag size={20} />
+
               <span>
-                <b>Pickup / Collection</b>
-                <small>Ready in about 25 min</small>
+                <b>
+                  Pickup / Collection
+                </b>
+
+                <small>
+                  Ready in about 25 min
+                </small>
               </span>
+
               <Check size={17} />
             </button>
+
             <button
-              className={details.delivery ? "selected" : ""}
-              onClick={() => setDetails({ ...details, delivery: true })}
+              type="button"
+              className={
+                details.delivery
+                  ? "selected"
+                  : ""
+              }
+              onClick={() =>
+                setDetails({
+                  ...details,
+                  delivery: true,
+                })
+              }
             >
               <Bike size={20} />
+
               <span>
                 <b>Deliver my order</b>
-                <small>Usually arrives in 45 to 60 min</small>
+
+                <small>
+                  Usually arrives in 45 to
+                  60 min
+                </small>
               </span>
+
               <Check size={17} />
             </button>
           </div>
+
           <form
             className="details-form"
             onSubmit={(event) => {
               event.preventDefault();
-              if (canSubmit) onPlace(details);
+
+              if (canSubmit) {
+                onPlace(details);
+              }
             }}
           >
             <div className="form-heading">
               <h2>Your details</h2>
-              <span>We will only use these for this order.</span>
+
+              <span>
+                We will only use these for
+                this order.
+              </span>
             </div>
+
             <label>
               Name
+
               <input
                 required
                 value={details.name}
-                onChange={(e) =>
-                  setDetails({ ...details, name: e.target.value })
+                onChange={(event) =>
+                  setDetails({
+                    ...details,
+                    name: event.target.value,
+                  })
                 }
                 placeholder="Your name"
               />
             </label>
+
             <label>
               Mobile number
+
               <input
                 required
                 value={details.phone}
-                onChange={(e) =>
-                  setDetails({ ...details, phone: e.target.value })
+                onChange={(event) =>
+                  setDetails({
+                    ...details,
+                    phone:
+                      event.target.value,
+                  })
                 }
                 placeholder="+27 82 000 0000"
               />
             </label>
+
             {details.delivery && (
               <label>
                 Delivery address
+
                 <input
                   required
                   value={details.address}
-                  onChange={(e) =>
-                    setDetails({ ...details, address: e.target.value })
+                  onChange={(event) =>
+                    setDetails({
+                      ...details,
+                      address:
+                        event.target.value,
+                    })
                   }
                   placeholder="Street, suburb, Kuruman"
                 />
               </label>
             )}
+
             <label>
               Anything we should know?{" "}
-              <span className="optional">Optional</span>
+              <span className="optional">
+                Optional
+              </span>
+
               <textarea
                 value={details.notes}
-                onChange={(e) =>
-                  setDetails({ ...details, notes: e.target.value })
+                onChange={(event) =>
+                  setDetails({
+                    ...details,
+                    notes:
+                      event.target.value,
+                  })
                 }
                 placeholder="Allergies, a message, or a good song recommendation..."
               />
             </label>
+
             <div className="form-heading">
               <h2>Payment method</h2>
-              <span>Choose how you would like to pay.</span>
+
+              <span>
+                Choose how you would like
+                to pay.
+              </span>
             </div>
+
             <div className="payment-toggle">
               <button
                 type="button"
-                className={details.payment === "cash" ? "selected" : ""}
-                onClick={() => setDetails({ ...details, payment: "cash" })}
+                className={
+                  details.payment ===
+                  "cash"
+                    ? "selected"
+                    : ""
+                }
+                onClick={() =>
+                  setDetails({
+                    ...details,
+                    payment: "cash",
+                  })
+                }
               >
-                <div className="payment-icon">💵</div>
+                <div className="payment-icon">
+                  💵
+                </div>
+
                 <span>
                   <b>Cash</b>
-                  <small>Pay when you collect or receive</small>
+
+                  <small>
+                    Pay when you collect or
+                    receive
+                  </small>
                 </span>
+
                 <Check size={17} />
               </button>
+
               <button
                 type="button"
-                className={details.payment === "card" ? "selected" : ""}
-                onClick={() => setDetails({ ...details, payment: "card" })}
+                className={
+                  details.payment ===
+                  "card"
+                    ? "selected"
+                    : ""
+                }
+                onClick={() =>
+                  setDetails({
+                    ...details,
+                    payment: "card",
+                  })
+                }
               >
-                <div className="payment-icon">💳</div>
+                <div className="payment-icon">
+                  💳
+                </div>
+
                 <span>
                   <b>Card</b>
-                  <small>Credit or debit card</small>
+
+                  <small>
+                    Credit or debit card
+                  </small>
                 </span>
+
                 <Check size={17} />
               </button>
             </div>
-            {details.payment === "card" && (
+
+            {details.payment ===
+              "card" && (
               <div className="card-details-form">
                 <div className="form-heading">
                   <h2>Card details</h2>
-                  <span>Your payment information is secure.</span>
+
+                  <span>
+                    Your payment information
+                    is secure.
+                  </span>
                 </div>
+
                 <label>
                   Cardholder name
+
                   <input
                     required
-                    value={details.cardName}
-                    onChange={(e) =>
-                      setDetails({ ...details, cardName: e.target.value })
+                    value={
+                      details.cardName
+                    }
+                    onChange={(event) =>
+                      setDetails({
+                        ...details,
+                        cardName:
+                          event.target.value,
+                      })
                     }
                     placeholder="Name on card"
                   />
                 </label>
+
                 <label>
                   Card number
+
                   <input
                     required
-                    value={details.cardNumber}
-                    onChange={(e) => {
-                      const val = e.target.value.replace(/\D/g, "").slice(0, 16);
-                      const formatted = val
-                        .replace(/(\d{4})/g, "$1 ")
-                        .trim();
-                      setDetails({ ...details, cardNumber: formatted });
+                    value={
+                      details.cardNumber
+                    }
+                    onChange={(event) => {
+                      const value =
+                        event.target.value
+                          .replace(
+                            /\D/g,
+                            "",
+                          )
+                          .slice(0, 16);
+
+                      const formatted =
+                        value
+                          .replace(
+                            /(\d{4})/g,
+                            "$1 ",
+                          )
+                          .trim();
+
+                      setDetails({
+                        ...details,
+                        cardNumber:
+                          formatted,
+                      });
                     }}
                     placeholder="1234 5678 9012 3456"
                     maxLength="19"
                   />
                 </label>
+
                 <div className="card-row">
                   <label>
                     Expiry date
+
                     <input
                       required
-                      value={details.cardExpiry}
-                      onChange={(e) => {
-                        let val = e.target.value.replace(/\D/g, "").slice(0, 4);
-                        if (val.length >= 2) {
-                          val = val.slice(0, 2) + "/" + val.slice(2);
+                      value={
+                        details.cardExpiry
+                      }
+                      onChange={(
+                        event,
+                      ) => {
+                        let value =
+                          event.target.value
+                            .replace(
+                              /\D/g,
+                              "",
+                            )
+                            .slice(0, 4);
+
+                        if (
+                          value.length >= 2
+                        ) {
+                          value =
+                            value.slice(
+                              0,
+                              2,
+                            ) +
+                            "/" +
+                            value.slice(2);
                         }
-                        setDetails({ ...details, cardExpiry: val });
+
+                        setDetails({
+                          ...details,
+                          cardExpiry:
+                            value,
+                        });
                       }}
                       placeholder="MM/YY"
                       maxLength="5"
                     />
                   </label>
+
                   <label>
                     CVV
+
                     <input
                       required
-                      value={details.cardCVV}
-                      onChange={(e) => {
-                        const val = e.target.value.replace(/\D/g, "").slice(0, 3);
-                        setDetails({ ...details, cardCVV: val });
+                      value={
+                        details.cardCVV
+                      }
+                      onChange={(
+                        event,
+                      ) => {
+                        const value =
+                          event.target.value
+                            .replace(
+                              /\D/g,
+                              "",
+                            )
+                            .slice(0, 3);
+
+                        setDetails({
+                          ...details,
+                          cardCVV:
+                            value,
+                        });
                       }}
                       placeholder="123"
                       maxLength="3"
@@ -1008,59 +1604,134 @@ function Checkout({ cart, total, updateQuantity, onBack, onPlace }) {
                 </div>
               </div>
             )}
-            <button className="primary-button wide" disabled={!canSubmit}>
-              Place order <ArrowRight size={17} />
+
+            <button
+              className="primary-button wide"
+              disabled={!canSubmit}
+            >
+              Place order
+              <ArrowRight size={17} />
             </button>
           </form>
         </section>
+
         <aside className="order-summary">
           <div className="summary-top">
             <h2>Your order</h2>
+
             <span>
-              {cart.reduce((sum, item) => sum + item.quantity, 0)} items
+              {cart.reduce(
+                (sum, item) =>
+                  sum + item.quantity,
+                0,
+              )}{" "}
+              items
             </span>
           </div>
+
           {cart.length === 0 ? (
             <div className="empty-cart">
               <ShoppingBag size={28} />
-              <p>Your order is empty.</p>
-              <button className="text-button" onClick={onBack}>
-                Browse the menu <ArrowRight size={15} />
+
+              <p>
+                Your order is empty.
+              </p>
+
+              <button
+                className="text-button"
+                onClick={onBack}
+              >
+                Browse the menu
+                <ArrowRight size={15} />
               </button>
             </div>
           ) : (
             <>
               {cart.map((item) => (
-                <div className="summary-item" key={item.id}>
-                  <img src={item.image} alt="" />
+                <div
+                  className="summary-item"
+                  key={item.id}
+                >
+                  <img
+                    src={item.image}
+                    alt=""
+                  />
+
                   <div>
                     <b>{item.name}</b>
-                    <span>{money(item.price * item.quantity)}</span>
+
+                    <span>
+                      {money(
+                        item.price *
+                          item.quantity,
+                      )}
+                    </span>
+
                     <div className="quantity">
-                      <button onClick={() => updateQuantity(item.id, -1)}>
-                        <Minus size={13} />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateQuantity(
+                            item.id,
+                            -1,
+                          )
+                        }
+                      >
+                        <Minus
+                          size={13}
+                        />
                       </button>
-                      <span>{item.quantity}</span>
-                      <button onClick={() => updateQuantity(item.id, 1)}>
-                        <Plus size={13} />
+
+                      <span>
+                        {item.quantity}
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateQuantity(
+                            item.id,
+                            1,
+                          )
+                        }
+                      >
+                        <Plus
+                          size={13}
+                        />
                       </button>
                     </div>
                   </div>
                 </div>
               ))}
+
               <div className="total-row">
                 <span>Subtotal</span>
-                <strong>{money(total)}</strong>
+
+                <strong>
+                  {money(total)}
+                </strong>
               </div>
+
               <div className="total-row muted">
-                <span>{details.delivery ? "Delivery" : "Collection"}</span>
                 <span>
-                  {details.delivery ? "Calculated at checkout" : "Free"}
+                  {details.delivery
+                    ? "Delivery"
+                    : "Collection"}
+                </span>
+
+                <span>
+                  {details.delivery
+                    ? "Calculated at checkout"
+                    : "Free"}
                 </span>
               </div>
+
               <div className="total-row grand">
                 <span>Total</span>
-                <strong>{money(total)}</strong>
+
+                <strong>
+                  {money(total)}
+                </strong>
               </div>
             </>
           )}
@@ -1070,107 +1741,195 @@ function Checkout({ cart, total, updateQuantity, onBack, onPlace }) {
   );
 }
 
-function Tracking({ order, onMenu }) {
-  if (!order)
+function Tracking({
+  order,
+  onMenu,
+}) {
+  if (!order) {
     return (
       <main className="tracking-page no-order">
         <PackageCheck size={42} />
-        <p className="eyebrow">Nothing to see yet</p>
+
+        <p className="eyebrow">
+          Nothing to see yet
+        </p>
+
         <h1>
           Your next great meal
           <br />
           <em>starts here.</em>
         </h1>
-        <button className="primary-button" onClick={onMenu}>
-          Browse the menu <ArrowRight size={17} />
+
+        <button
+          className="primary-button"
+          onClick={onMenu}
+        >
+          Browse the menu
+          <ArrowRight size={17} />
         </button>
       </main>
     );
-  const steps = order.delivery ? deliverySteps : statusSteps;
-  const currentIndex = steps.indexOf(order.status);
+  }
+
+  const steps = order.delivery
+    ? deliverySteps
+    : statusSteps;
+
+  const currentIndex =
+    steps.indexOf(order.status);
+
   return (
     <main className="tracking-page">
       <div className="tracking-header">
         <div>
-          <p className="eyebrow">Order {order.id}</p>
+          <p className="eyebrow">
+            Order {order.id}
+          </p>
+
           <h1>
             We have it.
             <br />
             <em>We are on it.</em>
           </h1>
         </div>
+
         <span className="live-pill">
-          <span /> Live updates
+          <span />
+          Live updates
         </span>
       </div>
+
       <div className="tracking-card">
         <div className="tracking-card-top">
           <div>
-            <span className="status-kicker">Current status</span>
+            <span className="status-kicker">
+              Current status
+            </span>
+
             <h2>{order.status}</h2>
+
             <p>
               {order.status === "Received"
                 ? "Your order has landed safely in our kitchen."
-                : order.status === "Being Prepared"
+                : order.status ===
+                    "Being Prepared"
                   ? "Our kitchen is making your order with care."
-                  : order.status === "Ready"
-                    ? "Come on in, your table is waiting."
-                    : order.status === "Out for Delivery"
+                  : order.status ===
+                      "Ready"
+                    ? "Come on in, your order is ready."
+                    : order.status ===
+                        "Out for Delivery"
                       ? "Your order is on its way to you."
-                      : "Enjoy every bite."}
+                      : order.status ===
+                          "Cancelled"
+                        ? "This order has been cancelled."
+                        : "Enjoy every bite."}
             </p>
           </div>
-          {order.delivery ? <Bike size={32} /> : <Utensils size={32} />}
+
+          {order.delivery ? (
+            <Bike size={32} />
+          ) : (
+            <Utensils size={32} />
+          )}
         </div>
+
         <div className="progress-track">
-          {steps.map((step, index) => (
-            <div
-              className={`progress-step ${index <= currentIndex ? "done" : ""} ${index === currentIndex ? "current" : ""}`}
-              key={step}
-            >
-              <span>
-                {index < currentIndex ? <Check size={13} /> : index + 1}
-              </span>
-              <small>{step}</small>
-            </div>
-          ))}
+          {steps.map(
+            (step, index) => (
+              <div
+                className={`progress-step ${
+                  index <= currentIndex
+                    ? "done"
+                    : ""
+                } ${
+                  index === currentIndex
+                    ? "current"
+                    : ""
+                }`}
+                key={step}
+              >
+                <span>
+                  {index <
+                  currentIndex ? (
+                    <Check
+                      size={13}
+                    />
+                  ) : (
+                    index + 1
+                  )}
+                </span>
+
+                <small>
+                  {step}
+                </small>
+              </div>
+            ),
+          )}
         </div>
+
         <div className="tracking-footer">
           <span>
-            <Clock3 size={16} />{" "}
-            {order.status === "Delivered" || order.status === "Ready"
-              ? "Ready now"
+            <Clock3 size={16} />
+
+            {order.status ===
+              "Delivered" ||
+            order.status === "Ready"
+              ? " Ready now"
               : order.delivery
-                ? "Arriving in 45 to 60 min"
-                : "Ready in about 25 min"}
+                ? " Arriving in 45 to 60 min"
+                : " Ready in about 25 min"}
           </span>
+
           <span>
-            <MapPin size={16} />{" "}
-            {order.delivery ? order.address : "TUA, Kuruman"}
+            <MapPin size={16} />
+
+            {order.delivery
+              ? ` ${order.address}`
+              : " TUA, Kuruman"}
           </span>
         </div>
       </div>
+
       <div className="tracking-order-list">
         <div>
           <h2>Order details</h2>
+
           <span>
-            {new Date(order.createdAt).toLocaleTimeString([], {
+            {new Date(
+              order.createdAt,
+            ).toLocaleTimeString([], {
               hour: "2-digit",
               minute: "2-digit",
             })}
           </span>
         </div>
+
         {order.items.map((item) => (
-          <div className="tracking-item" key={item.id}>
+          <div
+            className="tracking-item"
+            key={item.id}
+          >
             <span>
-              {item.quantity} × {item.name}
+              {item.quantity} ×{" "}
+              {item.name}
             </span>
-            <strong>{money(item.price * item.quantity)}</strong>
+
+            <strong>
+              {money(
+                item.price *
+                  item.quantity,
+              )}
+            </strong>
           </div>
         ))}
+
         <div className="tracking-total">
-          <span>Total paid</span>
-          <strong>{money(order.total)}</strong>
+          <span>Total</span>
+
+          <strong>
+            {money(order.total)}
+          </strong>
         </div>
       </div>
     </main>
@@ -1186,8 +1945,12 @@ function StaffPortal({
   cancelOrder,
   close,
 }) {
-  const [tab, setTab] = useState("orders");
-  const [editing, setEditing] = useState(null);
+  const [tab, setTab] =
+    useState("orders");
+
+  const [editing, setEditing] =
+    useState(null);
+
   const [form, setForm] = useState({
     name: "",
     category: "Mains",
@@ -1196,20 +1959,34 @@ function StaffPortal({
     image: seedMenu[0].image,
     tag: "",
   });
+
   const saveItem = (event) => {
     event.preventDefault();
-    if (!form.name || !form.price) return;
+
+    if (!form.name || !form.price) {
+      return;
+    }
+
     const item = {
       ...form,
-      id: editing?.id || `m${Date.now()}`,
+      id:
+        editing?.id ||
+        `m${Date.now()}`,
       price: Number(form.price),
     };
+
     setMenu((current) =>
       editing
-        ? current.map((entry) => (entry.id === editing.id ? item : entry))
+        ? current.map((entry) =>
+            entry.id === editing.id
+              ? item
+              : entry,
+          )
         : [...current, item],
     );
+
     setEditing(null);
+
     setForm({
       name: "",
       category: "Mains",
@@ -1219,33 +1996,84 @@ function StaffPortal({
       tag: "",
     });
   };
+
   const editItem = (item) => {
     setEditing(item);
     setForm(item);
   };
-  const activeOrders = orders.filter(
-    (order) => !["Delivered", "Ready", "Cancelled"].includes(order.status),
-  );
-  const today = new Date().toDateString();
-  const todaysOrders = orders.filter(
-    (order) => new Date(order.createdAt).toDateString() === today,
-  );
-  const revenue = todaysOrders
-    .filter((order) => order.status !== "Cancelled")
-    .reduce((sum, order) => sum + order.total, 0);
-  const pending = todaysOrders.filter((order) => order.status === "Received").length;
-  const approved = todaysOrders.filter((order) =>
-    ["Approved", "Being Prepared", "Ready", "Out for Delivery", "Delivered"].includes(order.status),
-  ).length;
-  const cancelled = todaysOrders.filter((order) => order.status === "Cancelled").length;
+
+  const activeOrders =
+    orders.filter(
+      (order) =>
+        ![
+          "Delivered",
+          "Ready",
+          "Cancelled",
+        ].includes(order.status),
+    );
+
+  const today =
+    new Date().toDateString();
+
+  const todaysOrders =
+    orders.filter(
+      (order) =>
+        new Date(
+          order.createdAt,
+        ).toDateString() === today,
+    );
+
+  const revenue =
+    todaysOrders
+      .filter(
+        (order) =>
+          order.status !==
+          "Cancelled",
+      )
+      .reduce(
+        (sum, order) =>
+          sum + order.total,
+        0,
+      );
+
+  const pending =
+    todaysOrders.filter(
+      (order) =>
+        order.status === "Received",
+    ).length;
+
+  const approved =
+    todaysOrders.filter(
+      (order) =>
+        [
+          "Approved",
+          "Being Prepared",
+          "Ready",
+          "Out for Delivery",
+          "Delivered",
+        ].includes(order.status),
+    ).length;
+
+  const cancelled =
+    todaysOrders.filter(
+      (order) =>
+        order.status === "Cancelled",
+    ).length;
+
   return (
     <div className="portal-backdrop">
       <section className="staff-portal">
         <header className="portal-header">
           <div>
-            <p className="eyebrow">Tua / Staff</p>
-            <h2>Good morning, team.</h2>
+            <p className="eyebrow">
+              Tua / Staff
+            </p>
+
+            <h2>
+              Good morning, team.
+            </h2>
           </div>
+
           <button
             className="icon-button"
             onClick={close}
@@ -1254,28 +2082,61 @@ function StaffPortal({
             <X size={20} />
           </button>
         </header>
+
         <div className="portal-tabs">
           <button
-            className={tab === "orders" ? "active" : ""}
-            onClick={() => setTab("orders")}
+            className={
+              tab === "orders"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setTab("orders")
+            }
           >
-            <LayoutDashboard size={16} /> Live orders{" "}
-            <b>{activeOrders.length}</b>
+            <LayoutDashboard
+              size={16}
+            />
+            Live orders
+            <b>
+              {activeOrders.length}
+            </b>
           </button>
+
           <button
-            className={tab === "menu" ? "active" : ""}
-            onClick={() => setTab("menu")}
+            className={
+              tab === "menu"
+                ? "active"
+                : ""
+            }
+            onClick={() =>
+              setTab("menu")
+            }
           >
-            <Utensils size={16} /> Menu management
+            <Utensils size={16} />
+            Menu management
           </button>
         </div>
-        <StaffStats revenue={revenue} pending={pending} approved={approved} cancelled={cancelled} />
+
+        <StaffStats
+          revenue={revenue}
+          pending={pending}
+          approved={approved}
+          cancelled={cancelled}
+        />
+
         {tab === "orders" ? (
           <OrderMonitor
             orders={orders}
-            progressOrder={progressOrder}
-            removeOrder={removeOrder}
-            cancelOrder={cancelOrder}
+            progressOrder={
+              progressOrder
+            }
+            removeOrder={
+              removeOrder
+            }
+            cancelOrder={
+              cancelOrder
+            }
           />
         ) : (
           <MenuManager
@@ -1293,121 +2154,278 @@ function StaffPortal({
   );
 }
 
-function StaffStats({ revenue, pending, approved, cancelled }) {
+function StaffStats({
+  revenue,
+  pending,
+  approved,
+  cancelled,
+}) {
   return (
     <div className="staff-stats">
-      <div className="stat-card stat-revenue"><span>Today's revenue</span><strong>{money(revenue)}</strong><small>Excluding cancelled</small></div>
-      <div className="stat-card"><span>Pending</span><strong>{pending}</strong><small>Awaiting approval</small></div>
-      <div className="stat-card"><span>Approved</span><strong>{approved}</strong><small>In service today</small></div>
-      <div className="stat-card stat-cancelled"><span>Cancelled</span><strong>{cancelled}</strong><small>Today's orders</small></div>
+      <div className="stat-card stat-revenue">
+        <span>
+          Today's revenue
+        </span>
+
+        <strong>
+          {money(revenue)}
+        </strong>
+
+        <small>
+          Excluding cancelled
+        </small>
+      </div>
+
+      <div className="stat-card">
+        <span>Pending</span>
+
+        <strong>{pending}</strong>
+
+        <small>
+          Awaiting approval
+        </small>
+      </div>
+
+      <div className="stat-card">
+        <span>Approved</span>
+
+        <strong>{approved}</strong>
+
+        <small>
+          In service today
+        </small>
+      </div>
+
+      <div className="stat-card stat-cancelled">
+        <span>Cancelled</span>
+
+        <strong>
+          {cancelled}
+        </strong>
+
+        <small>
+          Today's orders
+        </small>
+      </div>
     </div>
   );
 }
 
-function OrderMonitor({ orders, progressOrder, removeOrder, cancelOrder }) {
+function OrderMonitor({
+  orders,
+  progressOrder,
+  removeOrder,
+  cancelOrder,
+}) {
   return (
     <div className="monitor">
       <div className="monitor-heading">
         <div>
           <h3>Service pulse</h3>
-          <p>Move orders forward as the kitchen works.</p>
+
+          <p>
+            Move orders forward as the
+            kitchen works.
+          </p>
         </div>
+
         <span className="live-pill">
-          <span /> Syncing live
+          <span />
+          Syncing live
         </span>
       </div>
+
       {orders.length === 0 ? (
         <div className="staff-empty">
           <Coffee size={28} />
+
           <h3>No orders yet</h3>
-          <p>New customer orders will appear here.</p>
+
+          <p>
+            New customer orders will
+            appear here.
+          </p>
         </div>
       ) : (
         <div className="order-list">
           {orders.map((order) => {
-            const steps = order.delivery ? deliverySteps : statusSteps;
-            const isFinal = order.status === steps[steps.length - 1] || order.status === "Cancelled";
+            const steps =
+              order.delivery
+                ? deliverySteps
+                : statusSteps;
+
+            const isFinal =
+              order.status ===
+                steps[
+                  steps.length - 1
+                ] ||
+              order.status ===
+                "Cancelled";
+
             return (
-              <article className="staff-order" key={order.id}>
+              <article
+                className="staff-order"
+                key={order.id}
+              >
                 <div className="staff-order-top">
                   <div>
-                    <span className="order-id">{order.id}</span>
+                    <span className="order-id">
+                      {order.id}
+                    </span>
+
                     <h3>
-                      {order.customerName || order.name}{" "}
+                      {order.name}
+
                       <span className="order-time">
+                        {" "}
                         ·{" "}
-                        {new Date(order.createdAt).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
+                        {new Date(
+                          order.createdAt,
+                        ).toLocaleTimeString(
+                          [],
+                          {
+                            hour:
+                              "2-digit",
+                            minute:
+                              "2-digit",
+                          },
+                        )}
                       </span>
                     </h3>
                   </div>
+
                   <span
-                    className={`order-status status-${order.status.toLowerCase().replaceAll(" ", "-")}`}
+                    className={`order-status status-${order.status
+                      .toLowerCase()
+                      .replaceAll(
+                        " ",
+                        "-",
+                      )}`}
                   >
                     {order.status}
                   </span>
                 </div>
+
                 <div className="staff-order-body">
                   <div className="staff-items">
-                    {order.items.map((item) => (
-                      <span key={item.id}>
-                        <b>{item.quantity}×</b> {item.name}
-                      </span>
-                    ))}
+                    {order.items.map(
+                      (item) => (
+                        <span
+                          key={item.id}
+                        >
+                          <b>
+                            {
+                              item.quantity
+                            }
+                            ×
+                          </b>{" "}
+                          {item.name}
+                        </span>
+                      ),
+                    )}
                   </div>
+
                   <div className="customer-detail">
                     <span>
                       {order.delivery ? (
-                        <Bike size={15} />
+                        <Bike
+                          size={15}
+                        />
                       ) : (
-                        <ShoppingBag size={15} />
+                        <ShoppingBag
+                          size={15}
+                        />
                       )}{" "}
-                      {order.delivery ? "Delivery" : "Collection"}
+                      {order.delivery
+                        ? "Delivery"
+                        : "Collection"}
                     </span>
+
                     <span>
-                      <MapPin size={15} />{" "}
-                      {order.delivery ? order.address : "At restaurant"}
+                      <MapPin
+                        size={15}
+                      />{" "}
+                      {order.delivery
+                        ? order.address
+                        : "At restaurant"}
                     </span>
+
                     <span>
-                      <b>{money(order.total)}</b> · {order.phone}
+                      <b>
+                        {money(
+                          order.total,
+                        )}
+                      </b>{" "}
+                      · {order.phone}
                     </span>
                   </div>
                 </div>
+
                 <div className="staff-order-actions">
                   {!isFinal && (
                     <button
                       className="primary-button small"
-                      onClick={() => progressOrder(order.id)}
+                      onClick={() =>
+                        progressOrder(
+                          order.id,
+                        )
+                      }
                     >
-                      {order.status === "Received"
+                      {order.status ===
+                      "Received"
                         ? "Approve order"
-                        : order.status === "Approved"
+                        : order.status ===
+                            "Approved"
                           ? "Start preparing"
-                        : order.delivery
-                          ? order.status === "Being Prepared"
-                            ? "Mark out for delivery"
-                            : "Mark delivered"
-                          : "Mark ready"}{" "}
-                      <ArrowRight size={15} />
+                          : order.delivery
+                            ? order.status ===
+                              "Being Prepared"
+                              ? "Mark out for delivery"
+                              : "Mark delivered"
+                            : "Mark ready"}
+
+                      <ArrowRight
+                        size={15}
+                      />
                     </button>
                   )}
+
                   {isFinal && (
                     <span className="completed-label">
-                      <Check size={15} /> {order.status === "Cancelled" ? "Cancelled" : "Complete"}
+                      <Check
+                        size={15}
+                      />
+
+                      {order.status ===
+                      "Cancelled"
+                        ? "Cancelled"
+                        : "Complete"}
                     </span>
                   )}
+
                   {!isFinal && (
-                    <button className="cancel-button" onClick={() => cancelOrder(order.id)}>
+                    <button
+                      className="cancel-button"
+                      onClick={() =>
+                        cancelOrder(
+                          order.id,
+                        )
+                      }
+                    >
                       Cancel order
                     </button>
                   )}
+
                   <button
                     className="delete-button"
-                    onClick={() => removeOrder(order.id)}
+                    onClick={() =>
+                      removeOrder(
+                        order.id,
+                      )
+                    }
                   >
-                    <Trash2 size={15} /> Remove
+                    <Trash2 size={15} />
+                    Remove
                   </button>
                 </div>
               </article>
@@ -1432,25 +2450,42 @@ function MenuManager({
     <div className="menu-manager">
       <div className="monitor-heading">
         <div>
-          <h3>Menu management</h3>
-          <p>Prices and dishes update instantly across the customer menu.</p>
+          <h3>
+            Menu management
+          </h3>
+
+          <p>
+            Edit the dishes shown on this
+            device.
+          </p>
         </div>
       </div>
-      <form className="menu-form" onSubmit={saveItem}>
+
+      <form
+        className="menu-form"
+        onSubmit={saveItem}
+      >
         <div className="form-heading">
-          <h2>{editing ? "Edit dish" : "Add a dish"}</h2>
+          <h2>
+            {editing
+              ? "Edit dish"
+              : "Add a dish"}
+          </h2>
+
           {editing && (
             <button
               type="button"
               className="text-button"
               onClick={() => {
                 setEditing(null);
+
                 setForm({
                   name: "",
                   category: "Mains",
                   description: "",
                   price: "",
-                  image: seedMenu[0].image,
+                  image:
+                    seedMenu[0].image,
                   tag: "",
                 });
               }}
@@ -1459,77 +2494,153 @@ function MenuManager({
             </button>
           )}
         </div>
+
         <div className="form-grid">
           <label>
             Dish name
+
             <input
               value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  name:
+                    event.target.value,
+                })
+              }
               placeholder="e.g. Spring vegetable tart"
             />
           </label>
+
           <label>
             Price (R)
+
             <input
               type="number"
               value={form.price}
-              onChange={(e) => setForm({ ...form, price: e.target.value })}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  price:
+                    event.target.value,
+                })
+              }
               placeholder="145"
             />
           </label>
+
           <label>
             Category
+
             <select
               value={form.category}
-              onChange={(e) => setForm({ ...form, category: e.target.value })}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  category:
+                    event.target.value,
+                })
+              }
             >
-              <option>Small plates</option>
+              <option>
+                Small plates
+              </option>
               <option>Mains</option>
-              <option>To finish</option>
+              <option>
+                To finish
+              </option>
               <option>Drinks</option>
             </select>
           </label>
+
           <label>
-            Tag <span className="optional">Optional</span>
+            Tag{" "}
+            <span className="optional">
+              Optional
+            </span>
+
             <input
               value={form.tag}
-              onChange={(e) => setForm({ ...form, tag: e.target.value })}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  tag:
+                    event.target.value,
+                })
+              }
               placeholder="House favourite"
             />
           </label>
         </div>
+
         <label>
           Description
+
           <textarea
             value={form.description}
-            onChange={(e) => setForm({ ...form, description: e.target.value })}
+            onChange={(event) =>
+              setForm({
+                ...form,
+                description:
+                  event.target.value,
+              })
+            }
             placeholder="A short, delicious description..."
           />
         </label>
+
         <label>
           Image URL
+
           <input
             value={form.image}
-            onChange={(e) => setForm({ ...form, image: e.target.value })}
+            onChange={(event) =>
+              setForm({
+                ...form,
+                image:
+                  event.target.value,
+              })
+            }
           />
         </label>
-        <button className="primary-button small" type="submit">
-          {editing ? "Save changes" : "Add to menu"} <Check size={15} />
+
+        <button
+          className="primary-button small"
+          type="submit"
+        >
+          {editing
+            ? "Save changes"
+            : "Add to menu"}
+
+          <Check size={15} />
         </button>
       </form>
+
       <div className="managed-list">
         {menu.map((item) => (
-          <div className="managed-item" key={item.id}>
-            <img src={item.image} alt="" />
+          <div
+            className="managed-item"
+            key={item.id}
+          >
+            <img
+              src={item.image}
+              alt=""
+            />
+
             <div>
               <b>{item.name}</b>
+
               <span>
-                {item.category} · {money(item.price)}
+                {item.category} ·{" "}
+                {money(item.price)}
               </span>
             </div>
+
             <button
               className="icon-button"
-              onClick={() => editItem(item)}
+              onClick={() =>
+                editItem(item)
+              }
               aria-label={`Edit ${item.name}`}
             >
               <Pencil size={16} />
