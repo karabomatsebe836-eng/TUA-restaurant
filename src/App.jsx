@@ -32,7 +32,7 @@ const seedMenu = [
     price: 92,
     image:
       "https://images.unsplash.com/photo-1619096252214-ef06c45683e3?auto=format&fit=crop&w=900&q=85",
-    tag: "Plant based",
+    tag: "Plant-based",
   },
   {
     id: "m2",
@@ -56,12 +56,12 @@ const seedMenu = [
   {
     id: "m4",
     category: "Mains",
-    name: "Miso glazed cauliflower",
+    name: "Miso-glazed cauliflower",
     description: "Whipped feta, crispy rice, burnt spring onion",
     price: 165,
     image:
       "https://images.unsplash.com/photo-1565299507177-b0ac66763828?auto=format&fit=crop&w=900&q=85",
-    tag: "Plant based",
+    tag: "Plant-based",
   },
   {
     id: "m5",
@@ -98,17 +98,11 @@ const seedMenu = [
     price: 54,
     image:
       "https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=900&q=85",
-    tag: "Zero proof",
+    tag: "Zero-proof",
   },
 ];
 
-const statusSteps = [
-  "Received",
-  "Approved",
-  "Being Prepared",
-  "Ready",
-  "Collected",
-];
+const statusSteps = ["Received", "Approved", "Being Prepared", "Ready"];
 
 const deliverySteps = [
   "Received",
@@ -161,8 +155,35 @@ function orderToRow(order) {
   };
 }
 
+function menuFromRow(row) {
+  return {
+    id: row.id,
+    category: row.category,
+    name: row.name,
+    description: row.description || "",
+    price: Number(row.price),
+    image: row.image || "",
+    tag: row.tag || "",
+    sortOrder: row.sort_order ?? 0,
+  };
+}
+
+function menuToRow(item, sortOrder = 0) {
+  return {
+    id: item.id,
+    category: item.category,
+    name: item.name,
+    description: item.description || "",
+    price: Number(item.price),
+    image: item.image || null,
+    tag: item.tag || null,
+    sort_order: sortOrder,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 function App() {
-  const [menu, setMenu] = useState(() => loadStored("tua-menu", seedMenu));
+  const [menu, setMenu] = useState(seedMenu);
 
   // Keep only this customer's own current order in the browser.
   // Staff orders are loaded securely from Supabase after staff authentication.
@@ -184,9 +205,62 @@ function App() {
     () => loadStored("tua-order-tracking", null)?.trackingToken || null,
   );
 
+  // Load the shared menu from Supabase for every visitor and keep it live.
   useEffect(() => {
-    localStorage.setItem("tua-menu", JSON.stringify(menu));
-  }, [menu]);
+    if (!supabase) return;
+
+    let active = true;
+
+    const loadMenu = async () => {
+      const { data, error } = await supabase
+        .from("menu")
+        .select("*")
+        .order("sort_order", { ascending: true });
+
+      if (error) {
+        setNotice(`Could not load menu: ${error.message}`);
+        return;
+      }
+
+      if (active && data) {
+        setMenu(data.map(menuFromRow));
+      }
+    };
+
+    loadMenu();
+
+    const channel = supabase
+      .channel("menu-live")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "menu",
+        },
+        () => {
+          loadMenu();
+        },
+      )
+      .subscribe();
+
+    const handleFocus = () => {
+      loadMenu();
+    };
+
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      active = false;
+      window.removeEventListener("focus", handleFocus);
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Remove the old browser-only menu cache now that Supabase is the source of truth.
+  useEffect(() => {
+    localStorage.removeItem("tua-menu");
+  }, []);
 
   // Remove customer order information that older versions
   // of the website may have stored in this browser.
@@ -693,6 +767,7 @@ function App() {
           progressOrder={progressOrder}
           removeOrder={removeOrder}
           cancelOrder={cancelOrder}
+          setNotice={setNotice}
           close={closeStaffPortal}
         />
       )}
@@ -944,7 +1019,7 @@ function Home({
           </h1>
 
           <p className="hero-intro">
-            A warm, open kitchen restaurant
+            A warm, open-kitchen restaurant
             serving food with a little fire
             in its belly. Come as you are,
             stay for dessert.
@@ -1955,8 +2030,6 @@ function Tracking({
                     ? "Our kitchen is making your order with care."
                     : order.status === "Ready"
                       ? "Come on in, your order is ready."
-                      : order.status === "Collected"
-                        ? "Your order has been collected. Enjoy every bite."
                       : order.status === "Out for Delivery"
                         ? "Your order is on its way to you."
                         : order.status === "Delivered"
@@ -2014,8 +2087,7 @@ function Tracking({
 
             {order.status ===
               "Delivered" ||
-            order.status === "Ready" ||
-            order.status === "Collected"
+            order.status === "Ready"
               ? " Ready now"
               : order.delivery
                 ? " Arriving in 45 to 60 min"
@@ -2084,6 +2156,7 @@ function StaffPortal({
   progressOrder,
   removeOrder,
   cancelOrder,
+  setNotice,
   close,
 }) {
   const [tab, setTab] =
@@ -2101,33 +2174,8 @@ function StaffPortal({
     tag: "",
   });
 
-  const saveItem = (event) => {
-    event.preventDefault();
-
-    if (!form.name || !form.price) {
-      return;
-    }
-
-    const item = {
-      ...form,
-      id:
-        editing?.id ||
-        `m${Date.now()}`,
-      price: Number(form.price),
-    };
-
-    setMenu((current) =>
-      editing
-        ? current.map((entry) =>
-            entry.id === editing.id
-              ? item
-              : entry,
-          )
-        : [...current, item],
-    );
-
+  const resetForm = () => {
     setEditing(null);
-
     setForm({
       name: "",
       category: "Mains",
@@ -2138,9 +2186,114 @@ function StaffPortal({
     });
   };
 
+  const saveItem = async (event) => {
+    event.preventDefault();
+
+    if (!form.name.trim() || !form.price) {
+      setNotice("Please enter a dish name and price.");
+      return;
+    }
+
+    if (!supabase) {
+      setNotice("Could not connect to the menu database.");
+      return;
+    }
+
+    const item = {
+      ...form,
+      id: editing?.id || `m${Date.now()}`,
+      name: form.name.trim(),
+      description: form.description.trim(),
+      image: form.image.trim(),
+      tag: form.tag.trim(),
+      price: Number(form.price),
+    };
+
+    if (editing) {
+      const existingIndex = menu.findIndex((entry) => entry.id === editing.id);
+      const sortOrder = existingIndex >= 0
+        ? (menu[existingIndex].sortOrder ?? existingIndex + 1)
+        : menu.length + 1;
+
+      const { error } = await supabase
+        .from("menu")
+        .update(menuToRow(item, sortOrder))
+        .eq("id", editing.id);
+
+      if (error) {
+        setNotice(`Could not update menu item: ${error.message}`);
+        return;
+      }
+
+      setMenu((current) =>
+        current.map((entry) =>
+          entry.id === editing.id
+            ? { ...item, sortOrder }
+            : entry,
+        ),
+      );
+
+      setNotice("Menu item updated.");
+    } else {
+      const sortOrder =
+        menu.reduce(
+          (highest, entry) => Math.max(highest, entry.sortOrder || 0),
+          0,
+        ) + 1;
+
+      const newItem = { ...item, sortOrder };
+
+      const { error } = await supabase
+        .from("menu")
+        .insert(menuToRow(newItem, sortOrder));
+
+      if (error) {
+        setNotice(`Could not add menu item: ${error.message}`);
+        return;
+      }
+
+      setMenu((current) => [...current, newItem]);
+      setNotice("Menu item added.");
+    }
+
+    resetForm();
+  };
+
   const editItem = (item) => {
     setEditing(item);
-    setForm(item);
+    setForm({
+      name: item.name,
+      category: item.category,
+      description: item.description || "",
+      price: String(item.price),
+      image: item.image || "",
+      tag: item.tag || "",
+    });
+  };
+
+  const deleteMenuItem = async (id) => {
+    if (!supabase) {
+      setNotice("Could not connect to the menu database.");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("menu")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      setNotice(`Could not remove menu item: ${error.message}`);
+      return;
+    }
+
+    setMenu((current) => current.filter((item) => item.id !== id));
+
+    if (editing?.id === id) {
+      resetForm();
+    }
+
+    setNotice("Menu item removed.");
   };
 
   const activeOrders =
@@ -2149,7 +2302,6 @@ function StaffPortal({
         ![
           "Delivered",
           "Ready",
-          "Collected",
           "Cancelled",
         ].includes(order.status),
     );
@@ -2193,7 +2345,6 @@ function StaffPortal({
           "Ready",
           "Out for Delivery",
           "Delivered",
-          "Collected",
         ].includes(order.status),
     ).length;
 
@@ -2290,6 +2441,8 @@ function StaffPortal({
             setEditing={setEditing}
             saveItem={saveItem}
             editItem={editItem}
+            deleteMenuItem={deleteMenuItem}
+            resetForm={resetForm}
           />
         )}
       </section>
@@ -2525,9 +2678,7 @@ function OrderMonitor({
                               "Being Prepared"
                               ? "Mark out for delivery"
                               : "Mark delivered"
-                            : order.status === "Ready"
-                              ? "Mark collected"
-                              : "Mark ready"}
+                            : "Mark ready"}
 
                       <ArrowRight
                         size={15}
@@ -2587,9 +2738,10 @@ function MenuManager({
   form,
   setForm,
   editing,
-  setEditing,
   saveItem,
   editItem,
+  deleteMenuItem,
+  resetForm,
 }) {
   return (
     <div className="menu-manager">
@@ -2600,8 +2752,7 @@ function MenuManager({
           </h3>
 
           <p>
-            Edit the dishes shown on this
-            device.
+            Changes are saved to Supabase and update the customer menu across devices.
           </p>
         </div>
       </div>
@@ -2621,19 +2772,7 @@ function MenuManager({
             <button
               type="button"
               className="text-button"
-              onClick={() => {
-                setEditing(null);
-
-                setForm({
-                  name: "",
-                  category: "Mains",
-                  description: "",
-                  price: "",
-                  image:
-                    seedMenu[0].image,
-                  tag: "",
-                });
-              }}
+              onClick={resetForm}
             >
               Cancel
             </button>
@@ -2781,15 +2920,23 @@ function MenuManager({
               </span>
             </div>
 
-            <button
-              className="icon-button"
-              onClick={() =>
-                editItem(item)
-              }
-              aria-label={`Edit ${item.name}`}
-            >
-              <Pencil size={16} />
-            </button>
+            <div className="managed-item-actions">
+              <button
+                className="icon-button"
+                onClick={() => editItem(item)}
+                aria-label={`Edit ${item.name}`}
+              >
+                <Pencil size={16} />
+              </button>
+
+              <button
+                className="icon-button delete-button"
+                onClick={() => deleteMenuItem(item.id)}
+                aria-label={`Delete ${item.name}`}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
           </div>
         ))}
       </div>
